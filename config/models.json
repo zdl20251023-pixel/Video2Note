@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "defaultSelection": {
+    "providerId": "deepseek",
+    "modelId": "deepseek-flash"
+  },
+  "providers": [
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "enabled": true,
+      "protocol": "openai-chat",
+      "baseUrl": "https://api.deepseek.com",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "timeoutMs": 120000,
+      "speech": {
+        "protocol": "deepseek-asr",
+        "path": "/v1/tools/asr",
+        "segmentSeconds": 30
+      },
+      "requestDefaults": {
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "models": [
+        {
+          "id": "deepseek-flash",
+          "label": "DeepSeek Flash",
+          "vision": true,
+          "maxInputChars": 24000,
+          "maxOutputTokens": 12000,
+          "maxImagesPerBatch": 6
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "label": "DeepSeek V4 Pro",
+          "vision": false,
+          "maxInputChars": 24000,
+          "maxOutputTokens": 12000,
+          "maxImagesPerBatch": 6
+        }
+      ]
+    },
+    {
+      "id": "gemini",
+      "label": "Google Gemini",
+      "enabled": true,
+      "protocol": "openai-chat",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "apiKeyEnv": "GEMINI_API_KEY",
+      "timeoutMs": 120000,
+      "requestDefaults": {},
+      "models": [
+        {
+          "id": "gemini-3.6-flash",
+          "label": "Gemini 3.6 Flash",
+          "vision": true,
+          "maxInputChars": 24000,
+          "maxOutputTokens": 12000,
+          "maxImagesPerBatch": 6
+        }
+      ]
+    }
+  ]
+}
