@@ -1,6 +1,7 @@
 export const course = { title: '河牌加注教学', overview: '根据对手失误调整策略，先确认适用条件。', objectives: ['理解河牌决策'], prerequisites: ['了解位置与底池'], review: ['何时应该加注？'], uncertainties: ['未展示手牌需核对'] };
 export const state = { positions: 'BTN 对 BB', holeCards: 'AhKd', board: 'As7h2c4s9d', pot: '5.5 BB', stacks: '97.5 BB', actions: 'BB check', overlays: '河牌决策' };
 export function teachingReply(messages) {
+  if (messages[0].content?.includes('[VIDEO2NOTE_REFINEMENT]')) return { markdown: '## 教学核心\n\n王烨在 HJ 开池，谭轩在 CO 持 KK 加注。翻牌 5♥ 5♦ 6♥，转牌 A♦，河牌 10♥。重点是按对手范围判断下注和弃牌，不能忽略底池与有效筹码缺失。\n\n### 教学旁白\n\n先确认位置和牌面，再依次演示翻前、翻牌、转牌和河牌动作，说明每一步决策的前提。' };
   const content = messages[1].content;
   if (typeof content === 'string') {
     if (!content.startsWith('讲稿依据：')) return course;

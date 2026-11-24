@@ -6,13 +6,14 @@ import { readFile, readdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { ZipArchive } from 'archiver';
-import { ROOT, LOCAL, getTask, listTasks, saveTask, patchTask, normalizeUrl, taskDirectory, safeOutputPath } from './store.mjs';
+import { ROOT, LOCAL, getTask, listTasks, saveTask, patchTask, normalizeUrl, taskDirectory, safeOutputPath, getRefinementJob, listRefinementJobs, saveRefinementJob, patchRefinementJob, refinementJobDirectory } from './store.mjs';
 import { browserReady } from './acquire.mjs';
 import { modelCatalog, savePreference, saveCredential, snapshotModel, snapshotSpeech, callModel } from './models.mjs';
 import { PLATFORMS, parseVideoUrl, platformInfo } from './platforms.mjs';
 import { mediaToolReady } from './public-media.mjs';
 import { installMediaTool } from '../scripts/install-media-tools.mjs';
 import { createTaskRunner, readCompletion } from './task-runner.mjs';
+import { inspectRefinements } from './refine.mjs';
 import { taskArtifacts, restoreSavedArtifacts } from './artifacts.mjs';
 
 const app = express();
@@ -34,11 +35,15 @@ app.use(express.json({ limit: '32kb' }));
 const sampleUrl = 'https://pokercoaching.com/courses/complete-cash-game-system/welcome-to-the-complete-cash-game-system/';
 const samplePath = path.join(ROOT, 'artifacts/continuous-verification/welcome-to-the-complete-cash-game-system/summary.json');
 const doneStatuses = ['completed', 'partial', 'failed', 'cancelled'];
+function reconcileRefinement(task, saved) {
+  if (saved && !saved.refinement && ['queued', 'running', 'cancelling'].includes(task?.refinement?.status)) return { ...saved, refinement: { ...task.refinement, status: 'interrupted', message: '完整文档已保留，精简曾中断，可从已完成分段继续。' } };
+  return saved;
+}
 
 // A previous process cannot resume a live MediaRecorder. Keep the task and offer retry.
 for (const task of listTasks()) {
   if (['running', 'cancelling'].includes(task.status)) {
-    const saved = await readCompletion(taskDirectory(task.id));
+    const saved = reconcileRefinement(task, await readCompletion(taskDirectory(task.id)));
     if (saved) patchTask(task.id, saved);
     else if (task.status === 'cancelling') patchTask(task.id, { status: 'cancelled', stage: 'cancelled', message: '取消已生效，保存进度仍可复用。' });
     else if (existsSync(path.join(taskDirectory(task.id), 'acquisition.json'))) patchTask(task.id, { status: 'queued', cacheId: task.id, message: '服务重启后从保存进度继续' });
@@ -49,7 +54,22 @@ for (const task of listTasks()) {
   try { await restoreSavedArtifacts(task); }
   catch { console.error(`任务 ${task.id} 的已有产物恢复未完成，可通过重新整理重试。`); }
 }
-const runner = createTaskRunner({ listTasks, getTask, patchTask, spawnWorker: () => fork(path.join(ROOT, 'server/worker.mjs'), [], { cwd: ROOT, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], windowsHide: true }), recover: id => readCompletion(taskDirectory(id)), log: text => console.error(text) });
+function getWork(id) { return getTask(id) || getRefinementJob(id); }
+function listWork() { return [...listTasks(), ...listRefinementJobs()].sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))); }
+function patchWork(id, patch) {
+  const job = getRefinementJob(id);
+  if (!job) return patchTask(id, patch);
+  const saved = patchRefinementJob(id, patch);
+  if (getTask(job.targetTaskId)) patchTask(job.targetTaskId, { refinement: { ...(saved.refinement || {}), jobId: id, status: saved.status, progress: saved.progress || 0, message: saved.message, updatedAt: saved.updatedAt } });
+  return saved;
+}
+for (const job of listRefinementJobs()) {
+  if (['running', 'cancelling'].includes(job.status)) {
+    const saved = await readCompletion(refinementJobDirectory(job.id));
+    patchWork(job.id, saved || { status: job.status === 'cancelling' ? 'cancelled' : 'queued', message: '精简任务从已保存分段继续' });
+  }
+}
+const runner = createTaskRunner({ listTasks: listWork, getTask: getWork, patchTask: patchWork, spawnWorker: () => fork(path.join(ROOT, 'server/worker.mjs'), [], { cwd: ROOT, stdio: ['ignore', 'ignore', 'pipe', 'ipc'], windowsHide: true }), recover: async id => getRefinementJob(id) ? readCompletion(refinementJobDirectory(id)) : reconcileRefinement(getTask(id), await readCompletion(taskDirectory(id))), log: text => console.error(text) });
 const schedule = () => runner.schedule();
 async function createTask(input) {
   const frameInterval = Number(input.options?.frameInterval ?? 5);
@@ -83,7 +103,7 @@ function command(file, args) {
     child.on('close', code => code === 0 ? resolve() : reject(new Error(error.includes('ECONNREFUSED') ? '登录窗口未连接，请先打开登录窗口' : '操作未完成，请检查登录窗口后重试')));
   });
 }
-app.get('/api/status', async (_req, res) => res.json({ browserConnected: await browserReady(), sessionSaved: existsSync(path.join(LOCAL, 'auth.json')), platformSessions: Object.fromEntries(PLATFORMS.map(platform => [platform.id, existsSync(path.join(LOCAL, 'platform-cookies', `${platform.id}.txt`)) || platform.id === 'pokercoaching' && existsSync(path.join(LOCAL, 'auth.json'))])), mediaToolReady: mediaToolReady(), sampleAvailable: existsSync(samplePath), activeTaskId: runner.active?.id ?? null, mode: 'configurable' }));
+app.get('/api/status', async (_req, res) => res.json({ browserConnected: await browserReady(), sessionSaved: existsSync(path.join(LOCAL, 'auth.json')), platformSessions: Object.fromEntries(PLATFORMS.map(platform => [platform.id, existsSync(path.join(LOCAL, 'platform-cookies', `${platform.id}.txt`)) || platform.id === 'pokercoaching' && existsSync(path.join(LOCAL, 'auth.json'))])), mediaToolReady: mediaToolReady(), sampleAvailable: existsSync(samplePath), activeTaskId: (runner.active && getRefinementJob(runner.active.id)?.targetTaskId) || runner.active?.id || null, mode: 'configurable' }));
 app.get('/api/platforms', (_req, res) => res.json(PLATFORMS.map(({ domains, ...platform }) => platform)));
 app.post('/api/tools/media/install', async (_req, res, next) => {
   try {
@@ -147,11 +167,35 @@ app.post('/api/tasks/:id/regenerate', requireTask, async (req, res, next) => {
     res.status(201).json(await createTask({ url: req.task.url, source: req.task.source, cacheId: req.task.id, options: { ...req.task.options, ...req.body.options } }));
   } catch (error) { next(error); }
 });
+app.post('/api/tasks/:id/refine', requireTask, async (req, res, next) => {
+  try {
+    if (['queued', 'running', 'cancelling'].includes(req.task.status)) return res.status(409).json({ error: '请等待完整文档处理结束后提炼' });
+    const existing = listRefinementJobs().find(job => job.targetTaskId === req.task.id && ['queued', 'running', 'cancelling'].includes(job.status));
+    if (existing) return res.json({ jobId: existing.id, status: existing.status, targetTaskId: req.task.id });
+    const target = req.body.target || 'both';
+    if (!['both', 'video', 'script'].includes(target)) throw new Error('精简目标无效');
+    const inspection = await inspectRefinements(taskDirectory(req.task.id), { sourcePartial: req.task.result?.fullPlayback === false });
+    if ((target === 'video' || target === 'both') && !inspection.outputs.video.sourceMissing || (target === 'script' || target === 'both') && !inspection.outputs.script.sourceMissing) {
+      const model = await snapshotModel(req.body.selection || (await modelCatalog()).defaultSelection);
+      if (!model) throw new Error('精简需要外部模型，请选择模型并配置 API Key');
+      const now = new Date().toISOString();
+      const job = { id: randomUUID(), kind: 'refinement', targetTaskId: req.task.id, status: 'queued', stage: 'refining', progress: 0, message: '精简任务已排队，只读取现有 Markdown', createdAt: now, updatedAt: now, model, targets: target === 'both' ? ['video', 'script'] : [target], force: req.body.force === true };
+      saveRefinementJob(job); patchTask(req.task.id, { refinement: { jobId: job.id, status: job.status, message: job.message, progress: 0 } }); schedule();
+      return res.status(202).json({ jobId: job.id, status: getRefinementJob(job.id).status, targetTaskId: req.task.id });
+    }
+    throw new Error('没有可提炼的源 Markdown，请先生成对应完整文档');
+  } catch (error) { next(error); }
+});
+app.post('/api/tasks/:id/refine/cancel', requireTask, (req, res) => {
+  const job = listRefinementJobs().find(job => job.targetTaskId === req.task.id && ['queued', 'running', 'cancelling'].includes(job.status));
+  if (job) runner.cancel(job.id);
+  res.json(getTask(req.task.id));
+});
 app.get('/api/tasks/:id/note', requireTask, async (req, res) => {
   try { const directory = taskDirectory(req.task.id); const name = existsSync(path.join(directory, '视频信息整理.md')) ? '视频信息整理.md' : '学习笔记.md'; res.type('text/plain; charset=utf-8').send(await readFile(path.join(directory, name), 'utf8')); }
   catch { res.status(404).json({ error: '笔记尚未生成' }); }
 });
-const allowedFile = file => ['学习笔记.md', '本地整理.md', '完整转录.md', 'audio.wav', '视频信息整理.md', '产物状态.json', 'keyframes/说明.md', '视频解析.md', '教学讲稿.md', '关键图片.json', 'analysis-progress.json', '教学分镜.json'].includes(file) || /^((?:images|keyframes)\/frame-\d+\.png|captions\/(zh|en)\.vtt)$/.test(file);
+const allowedFile = file => ['视频重点.md', '精简讲稿.md', 'refinement-progress.json', '学习笔记.md', '本地整理.md', '完整转录.md', 'audio.wav', '视频信息整理.md', '产物状态.json', 'keyframes/说明.md', '视频解析.md', '教学讲稿.md', '关键图片.json', 'analysis-progress.json', '教学分镜.json'].includes(file) || /^((?:images|keyframes)\/frame-\d+\.png|captions\/(zh|en)\.vtt)$/.test(file);
 app.get('/api/tasks/:id/file', requireTask, (req, res, next) => {
   try {
     const file = req.query.path;
@@ -171,7 +215,7 @@ app.get('/api/tasks/:id/archive', requireTask, async (req, res, next) => {
     res.on('close', () => archive.abort());
     archive.pipe(res);
     const directory = taskDirectory(req.task.id);
-    for (const name of ['视频信息整理.md', '学习笔记.md', '本地整理.md', '完整转录.md', '视频解析.md', '教学讲稿.md', '关键图片.json', '教学分镜.json', 'analysis-progress.json', '产物状态.json']) if (existsSync(path.join(directory, name))) archive.file(path.join(directory, name), { name });
+    for (const name of ['视频重点.md', '精简讲稿.md', 'refinement-progress.json', '视频信息整理.md', '学习笔记.md', '本地整理.md', '完整转录.md', '视频解析.md', '教学讲稿.md', '关键图片.json', '教学分镜.json', 'analysis-progress.json', '产物状态.json']) if (existsSync(path.join(directory, name))) archive.file(path.join(directory, name), { name });
     for (const folder of ['images', 'captions', 'keyframes']) if (existsSync(path.join(directory, folder))) archive.directory(path.join(directory, folder), folder);
     await archive.finalize();
   } catch (error) { next(error); }

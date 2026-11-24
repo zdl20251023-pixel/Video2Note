@@ -11,6 +11,22 @@ mkdirSync(LOCAL, { recursive: true });
 mkdirSync(OUTPUT, { recursive: true });
 const db = new DatabaseSync(path.join(LOCAL, 'tasks.sqlite'));
 db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
+db.exec('CREATE TABLE IF NOT EXISTS refinement_jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
+export const getRefinementJob = id => { const row = db.prepare('SELECT data FROM refinement_jobs WHERE id = ?').get(id); return row ? JSON.parse(row.data) : null; };
+export const listRefinementJobs = () => db.prepare('SELECT data FROM refinement_jobs ORDER BY rowid DESC').all().map(row => JSON.parse(row.data));
+export function saveRefinementJob(job) {
+  db.prepare('INSERT INTO refinement_jobs(id,data) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(job.id, JSON.stringify(job));
+  return job;
+}
+export function patchRefinementJob(id, patch) {
+  const previous = getRefinementJob(id);
+  if (!previous) throw new Error('精简任务不存在');
+  return saveRefinementJob({ ...previous, ...patch, updatedAt: new Date().toISOString() });
+}
+export const refinementJobDirectory = id => {
+  if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('无效精简任务编号');
+  return path.join(LOCAL, 'refinement-jobs', id);
+};
 export const getTask = id => {
   const row = db.prepare('SELECT data FROM tasks WHERE id = ?').get(id);
   return row ? JSON.parse(row.data) : null;

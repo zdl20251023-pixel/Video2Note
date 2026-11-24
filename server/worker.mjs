@@ -1,13 +1,14 @@
 import { mkdir, readFile, writeFile, copyFile, cp, rm, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { ROOT, taskDirectory, nameTaskDirectory, getTask } from './store.mjs';
+import { ROOT, taskDirectory, nameTaskDirectory, getTask, refinementJobDirectory } from './store.mjs';
 import { extractFrames } from './public-media.mjs';
 import { acquire } from './acquire.mjs';
 import { recognizeFrames, writeNotes } from './notes.mjs';
 import { normalizeSubtitleEncoding } from './captions.mjs';
 import { writeSemanticNotes } from './semantic.mjs';
 import { ensureTranscript } from './transcribe.mjs';
+import { refineDocuments, inspectRefinements } from './refine.mjs';
 let cancelled = false;
 let cachedOcr = null;
 const modelAbort = new AbortController();
@@ -32,7 +33,7 @@ async function cachedMedia(id, directory, task) {
   const original = taskDirectory(id);
   const media = JSON.parse(await readFile(path.join(original, 'acquisition.json'), 'utf8'));
   let resampled = false;
-  for (const item of ['images', 'captions', 'audio.wav', 'audio.webm', 'speech-progress.json', 'analysis-progress.json', 'ocr-progress.json']) {
+  for (const item of ['images', 'captions', 'audio.wav', 'audio.webm', 'speech-progress.json', 'analysis-progress.json', 'ocr-progress.json', 'refinement-progress.json', '视频重点.md', '精简讲稿.md']) {
     try { if (original !== directory) await cp(path.join(original, item), path.join(directory, item), { recursive: true }); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
   if (media.sourceVideo) {
@@ -78,6 +79,13 @@ process.on('message', async message => {
   if (message.type !== 'start') return;
   const task = message.task;
   try {
+    if (task.kind === 'refinement') {
+      outputDirectory = refinementJobDirectory(task.id); await mkdir(outputDirectory, { recursive: true });
+      const original = getTask(task.targetTaskId);
+      if (!original) throw new Error('原视频任务不存在');
+      const refinement = await refineDocuments(taskDirectory(original.id), task.model, { targets: task.targets, force: task.force, operationId: task.id, sourcePartial: original.result?.fullPlayback === false, signal: modelAbort.signal, checkCancelled, report });
+      await finishTask({ status: refinement.status, stage: 'refined', progress: 100, message: refinement.message, refinement, finishedAt: new Date().toISOString() }); return;
+    }
     let directory = taskDirectory(task.id);
     await mkdir(directory, { recursive: true });
     outputDirectory = directory;
@@ -131,11 +139,18 @@ process.on('message', async message => {
     }
     let analysis = ai?.analysis || null;
     if (!analysis) { try { analysis = JSON.parse(await readFile(path.join(directory, 'analysis-progress.json'), 'utf8')).coverage; } catch {} }
-    const result = { artifactStatus: ai?.artifactStatus || null, documents: ai?.documents || ['视频信息整理.md'], keyframes: ai?.keyframes || [], analysis, platform: media.platform || task.platform || 'pokercoaching', validationMethod: media.validationMethod || 'browser-playback', transcriptionComplete: media.transcriptionComplete !== false, captionSources: media.captionSources || {}, fullPlayback: media.fullPlayback, coveredSeconds: media.coveredSeconds, duration: media.duration, frameCount: media.frames.length, cueCount: notes.cueCount, language: notes.language, warnings: [...new Set(warnings)], noteMode: notes.noteMode, model: ai?.model || null, aiError, summaryCalls: ai?.summaryCalls || 0, usage: ai?.usage || [], frames: annotatedFrames, captions: media.captions, hasAudio: true };
+    let result = { artifactStatus: ai?.artifactStatus || null, documents: ai?.documents || ['视频信息整理.md'], keyframes: ai?.keyframes || [], analysis, platform: media.platform || task.platform || 'pokercoaching', validationMethod: media.validationMethod || 'browser-playback', transcriptionComplete: media.transcriptionComplete !== false, captionSources: media.captionSources || {}, fullPlayback: media.fullPlayback, coveredSeconds: media.coveredSeconds, duration: media.duration, frameCount: media.frames.length, cueCount: notes.cueCount, language: notes.language, warnings: [...new Set(warnings)], noteMode: notes.noteMode, model: ai?.model || null, aiError, summaryCalls: ai?.summaryCalls || 0, usage: ai?.usage || [], frames: annotatedFrames, captions: media.captions, hasAudio: true };
+    await writeFile(path.join(directory, 'result.json'), JSON.stringify(result, null, 2));
+    report({ result, stage: 'refining', progress: 99, refinement: { status: 'running', message: '完整文档已保存，正在生成重点版', progress: 0 } });
+    let refinement;
+    try {
+      refinement = await refineDocuments(directory, task.model, { operationId: task.id, sourcePartial: !media.fullPlayback, signal: modelAbort.signal, checkCancelled, report: patch => report({ stage: 'refining', progress: 99, message: patch.message, refinement: { status: 'running', message: patch.message, progress: patch.progress } }) });
+    } catch (error) { checkCancelled(); refinement = { status: 'failed', message: error.message, outputs: (await inspectRefinements(directory)).outputs }; }
+    result = { ...result, refinement, documents: [...new Set([...result.documents, ...Object.values(refinement.outputs || {}).filter(output => output.available).map(output => output.file)])] };
     await writeFile(path.join(directory, 'result.json'), JSON.stringify(result, null, 2));
     checkCancelled();
     const complete = media.fullPlayback && notes.cueCount && !aiError && media.transcriptionComplete !== false;
-    await finishTask({ status: complete ? 'completed' : 'partial', stage: 'complete', progress: 100, message: aiError ? '部分步骤未完成，已保留可用的信息与图片，可继续整理' : complete ? '视频信息整理与教学产物已生成' : '已生成部分内容，请查看完整性说明', result, title: media.title, finishedAt: new Date().toISOString() });
+    await finishTask({ refinement, status: complete ? 'completed' : 'partial', stage: 'complete', progress: 100, message: aiError ? '部分步骤未完成，已保留可用的信息与图片，可继续整理' : complete ? '视频信息整理与教学产物已生成' : '已生成部分内容，请查看完整性说明', result, title: media.title, finishedAt: new Date().toISOString() });
   } catch (error) {
     await finishTask({ status: cancelled ? 'cancelled' : 'failed', stage: cancelled ? 'cancelled' : 'failed', message: cancelled ? '任务已取消' : error.message, finishedAt: new Date().toISOString() });
   } finally { clearInterval(heartbeat); if (process.connected) process.disconnect(); setTimeout(() => process.exit(0), 50); }

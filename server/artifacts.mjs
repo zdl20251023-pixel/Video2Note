@@ -2,12 +2,13 @@ import { readFile, access, copyFile } from 'node:fs/promises';
 import path from 'node:path';
 import { taskDirectory, patchTask } from './store.mjs';
 import { ARTIFACT_VERSION, writeTeachingArtifacts } from './teaching-artifacts.mjs';
+import { inspectRefinements } from './refine.mjs';
 
 const exists = async file => { try { await access(file); return true; } catch { return false; } };
 export async function taskArtifacts(task) {
   const directory = taskDirectory(task.id);
   const documents = [];
-  for (const name of ['视频信息整理.md', '视频解析.md', '学习笔记.md', '教学讲稿.md']) if (await exists(path.join(directory, name))) documents.push(name);
+  for (const name of ['视频重点.md', '精简讲稿.md', '视频信息整理.md', '视频解析.md', '学习笔记.md', '教学讲稿.md']) if (await exists(path.join(directory, name))) documents.push(name);
   let artifactStatus = null, keyframes = [], errors = [];
   try { artifactStatus = JSON.parse(await readFile(path.join(directory, '产物状态.json'), 'utf8')); } catch {}
   try {
@@ -21,7 +22,7 @@ export async function taskArtifacts(task) {
       ...(batch.lesson?.status === 'failed' ? (batch.lesson.groups || []).filter(group => group.status === 'failed').map(group => ({ batch: batch.id, stage: '教学讲稿', message: group.error, imageCount: 0 })) : []),
     ]);
   } catch {}
-  return { documents, artifactStatus, keyframes, errors };
+  return { documents, artifactStatus, keyframes, errors, refinement: await inspectRefinements(directory, { sourcePartial: task.result?.fullPlayback === false }) };
 }
 
 export async function restoreSavedArtifacts(task) {

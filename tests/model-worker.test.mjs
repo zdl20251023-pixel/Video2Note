@@ -45,7 +45,14 @@ for (const failure of [false, true]) {
       assert.ok(!note.includes('test-only-not-a-real-key'));
       assert.ok(!JSON.stringify(done).includes('test-only-not-a-real-key'));
       if (failure) { assert.match(note, /已回退为本地整理/); assert.equal(done.result.model, null); }
-      else { assert.match(note, /模拟测试服务/); assert.equal(done.result.model.modelId, 'mock-model'); }
+      else {
+        assert.match(note, /模拟测试服务/); assert.equal(done.result.model.modelId, 'mock-model');
+        assert.equal(done.refinement.status, 'completed');
+        for (const name of ['视频重点.md', '精简讲稿.md']) {
+          assert.ok(done.result.documents.includes(name));
+          assert.match(await readFile(path.join(taskDirectory(id), name), 'utf8'), /教学/);
+        }
+      }
     } finally {
       if (child && child.exitCode === null) child.kill();
       if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
